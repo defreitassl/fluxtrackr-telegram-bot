@@ -32,11 +32,15 @@ Nao commite `.env`.
 O bot tambem configura o menu nativo de comandos do Telegram e envia um teclado
 persistente com as principais funcoes:
 
-- `Lancar transacao`
-- `Resumo`
-- `Categorias`
-- `Cancelar`
-- `Ajuda`
+- `🔴 Lançar gasto`
+- `🟢 Lançar entrada`
+- `🔵 Resumo`
+- `🟣 Categorias`
+- `⚪ Cancelar`
+- `❔ Ajuda`
+
+Os estilos de cor dependem do suporte do cliente Telegram. Os emojis permanecem
+como fallback visual.
 
 ## Cadastro de transacoes
 
@@ -73,10 +77,13 @@ conexao, falha de autenticacao, validacao rejeitada pela API ou erro interno.
 
 ## Sessao do chat
 
-O bot mantem apenas estado temporario em memoria para operacoes guiadas. Se o
-usuario ficar um dia sem interagir, a proxima mensagem reinicia a sessao do bot,
-limpa operacoes pendentes e mostra o menu novamente. O historico do Telegram nao
-e apagado, pois bots nao controlam o historico local do usuario.
+O bot mantem apenas estado temporario em memoria para operacoes guiadas. Todos
+os dias a 00h, no horario local do processo, ele tenta apagar as mensagens
+rastreadas do dia, limpa operacoes pendentes e envia um menu novo.
+
+Esse reset depende do bot estar rodando no momento da virada do dia. O Telegram
+tambem limita exclusao de mensagens antigas, entao mensagens que o bot nao
+conhece ou nao pode mais excluir podem permanecer no historico.
 
 ## Rodar
 

@@ -18,14 +18,19 @@ import {
 } from './parser';
 
 const PENDING_TRANSACTION_TTL_MS = 10 * 60 * 1000;
-const CHAT_SESSION_RESET_MS = 24 * 60 * 60 * 1000;
 const MENU_BUTTONS = {
-  addTransaction: 'Lancar transacao',
-  summary: 'Resumo',
-  categories: 'Categorias',
-  cancel: 'Cancelar',
-  help: 'Ajuda',
+  addExpense: '🔴 Lançar gasto',
+  addIncome: '🟢 Lançar entrada',
+  summary: '🔵 Resumo',
+  categories: '🟣 Categorias',
+  cancel: '⚪ Cancelar',
+  help: '❔ Ajuda',
 } as const;
+const LEGACY_MENU_BUTTONS = {
+  addExpense: ['🔴 Lancar gasto', 'Lancar gasto', 'Lançar gasto'],
+  addIncome: ['🟢 Lancar entrada', 'Lancar entrada', 'Lançar entrada'],
+  addTransaction: ['Lancar transacao', 'Lançar transação'],
+};
 
 type PendingTransaction = {
   id: string;
@@ -38,6 +43,11 @@ type PendingTransaction = {
 
 type ChatSession = {
   lastInteractionAt: number;
+};
+
+type PendingTypeSelection = {
+  type: TransactionType;
+  createdAt: number;
 };
 
 type ReplyableContext = Pick<Context, 'reply'> & {
@@ -65,7 +75,9 @@ const bot = new Telegraf(config.telegramBotToken, {
   },
 });
 const pendingTransactions = new Map<number, PendingTransaction>();
+const pendingTypeSelections = new Map<number, PendingTypeSelection>();
 const chatSessions = new Map<number, ChatSession>();
+const trackedChatMessages = new Map<number, Set<number>>();
 
 function isAuthorized(userId: number | undefined) {
   return userId === config.telegramUserId;
@@ -78,12 +90,22 @@ function startsWithKnownTypeCommand(text: string) {
 
 function mainMenuKeyboard() {
   return Markup.keyboard([
-    [MENU_BUTTONS.addTransaction],
+    [
+      menuButton(MENU_BUTTONS.addExpense, 'danger'),
+      menuButton(MENU_BUTTONS.addIncome, 'success'),
+    ],
     [MENU_BUTTONS.summary, MENU_BUTTONS.categories],
     [MENU_BUTTONS.cancel, MENU_BUTTONS.help],
   ])
     .resize()
     .persistent();
+}
+
+function menuButton(
+  text: string,
+  style: 'danger' | 'success' | 'primary',
+) {
+  return { text, style } as never;
 }
 
 function startText() {
@@ -120,6 +142,20 @@ function transactionPromptText() {
   ].join('\n');
 }
 
+function typedTransactionPromptText(type: TransactionType) {
+  const typeLabel = type === 'expense' ? 'gasto' : 'entrada';
+  const example =
+    type === 'expense'
+      ? '32.90 almoco alimentacao'
+      : '1200 freela trabalho';
+
+  return [
+    `Envie os dados da ${typeLabel}.`,
+    '',
+    `Exemplo: ${example}`,
+  ].join('\n');
+}
+
 function getUserErrorMessage(error: unknown) {
   if (error instanceof ApiConnectionError) {
     return 'A API local nao respondeu agora. Confira se ela esta rodando em API_BASE_URL.';
@@ -152,28 +188,94 @@ function getUserErrorMessage(error: unknown) {
   return 'Nao consegui concluir essa acao.';
 }
 
+function trackMessage(chatId: number | undefined, messageId: number | undefined) {
+  if (!chatId || !messageId) {
+    return;
+  }
+
+  const messages = trackedChatMessages.get(chatId) ?? new Set<number>();
+  messages.add(messageId);
+  trackedChatMessages.set(chatId, messages);
+}
+
+function trackIncomingMessage(ctx: Context) {
+  if (!ctx.chat || !('message' in ctx) || !ctx.message) {
+    return;
+  }
+
+  trackMessage(ctx.chat.id, ctx.message.message_id);
+}
+
+async function trackedReply(
+  ctx: ReplyableContext,
+  text: string,
+  extra?: Parameters<Context['reply']>[1],
+) {
+  const message = await ctx.reply(text, extra);
+  trackMessage(message.chat.id, message.message_id);
+  return message;
+}
+
+function resetUserState(userId: number) {
+  pendingTransactions.delete(userId);
+  pendingTypeSelections.delete(userId);
+}
+
+function getNextMidnightDelay() {
+  const now = new Date();
+  const nextMidnight = new Date(now);
+  nextMidnight.setDate(now.getDate() + 1);
+  nextMidnight.setHours(0, 0, 0, 0);
+
+  return nextMidnight.getTime() - now.getTime();
+}
+
+function scheduleDailyChatReset() {
+  setTimeout(async () => {
+    await resetTrackedChatsAtMidnight();
+    scheduleDailyChatReset();
+  }, getNextMidnightDelay());
+}
+
+async function resetTrackedChatsAtMidnight() {
+  const chatIds = new Set<number>([
+    ...trackedChatMessages.keys(),
+    config.telegramUserId,
+  ]);
+
+  resetUserState(config.telegramUserId);
+  chatSessions.delete(config.telegramUserId);
+
+  for (const chatId of chatIds) {
+    const messageIds = trackedChatMessages.get(chatId) ?? new Set<number>();
+
+    for (const messageId of messageIds) {
+      try {
+        await bot.telegram.deleteMessage(chatId, messageId);
+      } catch (error) {
+        logWarn('daily_message_delete_failed', { chatId, messageId });
+      }
+    }
+
+    trackedChatMessages.set(chatId, new Set<number>());
+
+    try {
+      const message = await bot.telegram.sendMessage(
+        chatId,
+        'Novo dia iniciado. Limpei a sessao do bot e reabri o menu.',
+        mainMenuKeyboard(),
+      );
+      trackMessage(message.chat.id, message.message_id);
+    } catch (error) {
+      logError('daily_reset_menu_send_failed', error, { chatId });
+    }
+  }
+
+  logInfo('daily_chat_reset_completed', { chatCount: chatIds.size });
+}
+
 async function resetExpiredChatSession(ctx: ReplyableContext) {
-  const now = Date.now();
-  const session = chatSessions.get(ctx.from.id);
-
-  if (!session) {
-    chatSessions.set(ctx.from.id, { lastInteractionAt: now });
-    return;
-  }
-
-  if (now - session.lastInteractionAt < CHAT_SESSION_RESET_MS) {
-    session.lastInteractionAt = now;
-    return;
-  }
-
-  pendingTransactions.delete(ctx.from.id);
-  chatSessions.set(ctx.from.id, { lastInteractionAt: now });
-  logInfo('chat_session_reset', { reason: 'daily_inactivity' });
-
-  await ctx.reply(
-    'Sessao reiniciada apos um dia sem atividade. Use o menu abaixo para continuar.',
-    mainMenuKeyboard(),
-  );
+  chatSessions.set(ctx.from.id, { lastInteractionAt: Date.now() });
 }
 
 function createPendingTransaction(
@@ -203,6 +305,30 @@ function getPendingTransaction(userId: number, id: string) {
   }
 
   return pending;
+}
+
+function setPendingTypeSelection(userId: number, type: TransactionType) {
+  pendingTransactions.delete(userId);
+  pendingTypeSelections.set(userId, {
+    type,
+    createdAt: Date.now(),
+  });
+}
+
+function consumePendingTypeSelection(userId: number) {
+  const pendingType = pendingTypeSelections.get(userId);
+
+  if (!pendingType) {
+    return undefined;
+  }
+
+  pendingTypeSelections.delete(userId);
+
+  if (Date.now() - pendingType.createdAt > PENDING_TRANSACTION_TTL_MS) {
+    return undefined;
+  }
+
+  return pendingType.type;
 }
 
 function getCategoriesForType(categories: Category[], type: TransactionType) {
@@ -356,38 +482,46 @@ async function replyWithCategorySelection(
   if (getCategoriesForType(pending.categories, pending.type).length === 0) {
     const confirmation = await createTransactionFromPending(pending, undefined);
     pendingTransactions.delete(ctx.from.id);
-    await ctx.reply(confirmation, mainMenuKeyboard());
+    await trackedReply(ctx, confirmation, mainMenuKeyboard());
     return;
   }
 
-  await ctx.reply(categoryPrompt(pending), categoryKeyboard(pending));
+  await trackedReply(ctx, categoryPrompt(pending), categoryKeyboard(pending));
 }
 
 async function editToExpiredMessage(ctx: EditableContext) {
   await ctx.editMessageText('Esta operacao expirou. Envie a transacao novamente.')
-    .catch(() => ctx.reply('Esta operacao expirou. Envie a transacao novamente.'));
+    .catch(() =>
+      trackedReply(ctx, 'Esta operacao expirou. Envie a transacao novamente.'),
+    );
 }
 
 async function sendHelp(ctx: ReplyableContext) {
-  await ctx.reply(helpText(), mainMenuKeyboard());
+  await trackedReply(ctx, helpText(), mainMenuKeyboard());
 }
 
 async function sendMainMenu(ctx: ReplyableContext) {
-  await ctx.reply('Menu principal:', mainMenuKeyboard());
+  await trackedReply(ctx, 'Menu principal:', mainMenuKeyboard());
 }
 
 async function sendTransactionPrompt(ctx: ReplyableContext) {
-  await ctx.reply(transactionPromptText(), mainMenuKeyboard());
+  await trackedReply(ctx, transactionPromptText(), mainMenuKeyboard());
+}
+
+async function startTypedTransaction(ctx: ReplyableContext, type: TransactionType) {
+  setPendingTypeSelection(ctx.from.id, type);
+  await trackedReply(ctx, typedTransactionPromptText(type), mainMenuKeyboard());
 }
 
 async function sendCategories(ctx: ReplyableContext) {
   try {
     const categories = await api.getCategories({ forceRefresh: true });
     logInfo('categories_listed', { count: categories.length });
-    await ctx.reply(formatCategoryList(categories), mainMenuKeyboard());
+    await trackedReply(ctx, formatCategoryList(categories), mainMenuKeyboard());
   } catch (error) {
     logError('categories_list_failed', error);
-    await ctx.reply(
+    await trackedReply(
+      ctx,
       `${getUserErrorMessage(error)}\n\nUse /help para ver exemplos.`,
       mainMenuKeyboard(),
     );
@@ -396,10 +530,12 @@ async function sendCategories(ctx: ReplyableContext) {
 
 async function cancelPendingOperation(ctx: ReplyableContext) {
   const userId = ctx.from.id;
-  const hadPending = pendingTransactions.delete(userId);
+  const hadPending =
+    pendingTransactions.delete(userId) || pendingTypeSelections.delete(userId);
 
   logInfo('pending_operation_cancelled', { hadPending });
-  await ctx.reply(
+  await trackedReply(
+    ctx,
     hadPending
       ? 'Operacao cancelada.'
       : 'Nao ha operacao em andamento para cancelar.',
@@ -419,7 +555,8 @@ async function sendMonthlySummary(ctx: ReplyableContext) {
       year: summary.year,
       month: summary.month,
     });
-    await ctx.reply(
+    await trackedReply(
+      ctx,
       [
         `Resumo ${String(summary.month).padStart(2, '0')}/${summary.year}`,
         `Receitas: ${formatMoney(summary.fixedIncomeTotal + summary.transactionIncomeTotal)}`,
@@ -431,7 +568,8 @@ async function sendMonthlySummary(ctx: ReplyableContext) {
     );
   } catch (error) {
     logError('monthly_summary_failed', error);
-    await ctx.reply(
+    await trackedReply(
+      ctx,
       `${getUserErrorMessage(error)}\n\nUse /help para ver exemplos.`,
       mainMenuKeyboard(),
     );
@@ -465,6 +603,7 @@ async function ensureApiIsReachable() {
 
 bot.use(async (ctx, next) => {
   if (isAuthorized(ctx.from?.id)) {
+    trackIncomingMessage(ctx);
     await resetExpiredChatSession(ctx as BotContext);
     return next();
   }
@@ -475,13 +614,19 @@ bot.use(async (ctx, next) => {
   }
 });
 
-bot.start((ctx) => ctx.reply(startText(), mainMenuKeyboard()));
+bot.start((ctx) => trackedReply(ctx, startText(), mainMenuKeyboard()));
 bot.help(sendHelp);
 bot.command('menu', sendMainMenu);
 bot.command('categorias', sendCategories);
 bot.command('cancelar', cancelPendingOperation);
 bot.command('resumo', sendMonthlySummary);
-bot.hears(MENU_BUTTONS.addTransaction, sendTransactionPrompt);
+bot.hears([MENU_BUTTONS.addExpense, ...LEGACY_MENU_BUTTONS.addExpense], (ctx) =>
+  startTypedTransaction(ctx, 'expense'),
+);
+bot.hears([MENU_BUTTONS.addIncome, ...LEGACY_MENU_BUTTONS.addIncome], (ctx) =>
+  startTypedTransaction(ctx, 'income'),
+);
+bot.hears(LEGACY_MENU_BUTTONS.addTransaction, sendTransactionPrompt);
 bot.hears(MENU_BUTTONS.summary, sendMonthlySummary);
 bot.hears(MENU_BUTTONS.categories, sendCategories);
 bot.hears(MENU_BUTTONS.cancel, cancelPendingOperation);
@@ -526,7 +671,8 @@ bot.action(/^tx:cat:([a-z0-9]+):(.+)$/, async (ctx) => {
 
   if (!category) {
     logWarn('category_callback_not_found');
-    await ctx.reply(
+    await trackedReply(
+      ctx,
       'Categoria nao encontrada. Use /categorias para atualizar a lista.',
       mainMenuKeyboard(),
     );
@@ -577,6 +723,20 @@ bot.on(message('text'), async (ctx) => {
 
   try {
     const categories = await api.getCategories();
+    const pendingType = consumePendingTypeSelection(userId);
+
+    if (pendingType) {
+      const loose = parseLooseTransactionMessage(ctx.message.text);
+      const pending = createPendingTransaction(userId, {
+        type: pendingType,
+        amount: loose.amount,
+        description: loose.description,
+        categories,
+      });
+
+      await replyWithCategorySelection(ctx, pending);
+      return;
+    }
 
     try {
       const parsed = parseTransactionMessage(ctx.message.text, categories);
@@ -594,7 +754,8 @@ bot.on(message('text'), async (ctx) => {
           hasCategory: true,
           guided: false,
         });
-        await ctx.reply(
+        await trackedReply(
+          ctx,
           formatTransactionConfirmation(transaction, parsed.categoryName),
           mainMenuKeyboard(),
         );
@@ -622,7 +783,8 @@ bot.on(message('text'), async (ctx) => {
         categories,
       });
 
-      await ctx.reply(
+      await trackedReply(
+        ctx,
         [
           'Nao identifiquei se isso e gasto ou receita.',
           `${formatMoney(pending.amount)} - ${pending.description}`,
@@ -636,7 +798,8 @@ bot.on(message('text'), async (ctx) => {
     }
   } catch (error) {
     logError('transaction_message_failed', error);
-    await ctx.reply(
+    await trackedReply(
+      ctx,
       `${getUserErrorMessage(error)}\n\nUse /help para ver exemplos.`,
       mainMenuKeyboard(),
     );
@@ -651,6 +814,7 @@ bot
   .launch(async () => {
     await configureBotCommands();
     await ensureApiIsReachable();
+    scheduleDailyChatReset();
     logInfo('bot_started');
   })
   .catch((error: unknown) => {
