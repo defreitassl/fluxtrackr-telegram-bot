@@ -79,6 +79,32 @@ const pendingTypeSelections = new Map<number, PendingTypeSelection>();
 const chatSessions = new Map<number, ChatSession>();
 const trackedChatMessages = new Map<number, Set<number>>();
 
+function escapeHtml(value: string | number | undefined) {
+  return String(value ?? '')
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;');
+}
+
+function codeExample(value: string) {
+  return `<code>${escapeHtml(value)}</code>`;
+}
+
+function withReplyHtml(extra?: Parameters<Context['reply']>[1]) {
+  return {
+    parse_mode: 'HTML' as const,
+    ...extra,
+  };
+}
+
+function withEditHtml(extra?: Parameters<Context['editMessageText']>[1]) {
+  return {
+    parse_mode: 'HTML' as const,
+    ...extra,
+  };
+}
+
 function isAuthorized(userId: number | undefined) {
   return userId === config.telegramUserId;
 }
@@ -110,35 +136,44 @@ function menuButton(
 
 function startText() {
   return [
-    'FluxTrackr pronto.',
-    'Envie uma transacao como: gasto 32.90 almoco alimentacao',
-    'Ou use o menu abaixo.',
+    '👋 <b>FluxTrackr pronto</b>',
+    '',
+    'Escolha uma ação no menu ou envie uma transação em texto livre.',
+    '',
+    `Exemplo: ${codeExample('gasto 32.90 almoço alimentação')}`,
   ].join('\n');
 }
 
 function helpText() {
   return [
-    'Exemplos:',
-    'gasto 32.90 almoco alimentacao',
-    'receita 1200 freela trabalho',
-    '32.90 almoco',
+    '❔ <b>Como usar o bot</b>',
     '',
-    'Comandos:',
-    '/resumo - resumo do mes atual',
-    '/categorias - listar categorias cadastradas',
-    '/cancelar - cancelar uma operacao guiada',
-    '/menu - mostrar o menu principal',
+    'Você pode tocar nos botões do menu ou escrever direto:',
+    '',
+    `• ${codeExample('gasto 32.90 almoço alimentação')}`,
+    `• ${codeExample('receita 1200 freela trabalho')}`,
+    `• ${codeExample('32.90 almoço')}`,
+    '',
+    'Se faltar tipo ou categoria, eu pergunto no próximo passo.',
+    '',
+    '<b>Comandos úteis</b>',
+    '📊 /resumo - resumo do mês atual',
+    '🏷️ /categorias - listar categorias',
+    '↩️ /cancelar - cancelar operação atual',
+    '🏠 /menu - mostrar o menu principal',
   ].join('\n');
 }
 
 function transactionPromptText() {
   return [
-    'Envie a transacao em uma mensagem.',
+    '✍️ <b>Lançar transação</b>',
     '',
-    'Exemplos:',
-    'gasto 32.90 almoco alimentacao',
-    'receita 1200 freela trabalho',
-    '32.90 almoco',
+    'Envie tudo em uma mensagem. Se preferir, use os botões de gasto ou entrada para pular a escolha do tipo.',
+    '',
+    '<b>Exemplos</b>',
+    codeExample('gasto 32.90 almoço alimentação'),
+    codeExample('receita 1200 freela trabalho'),
+    codeExample('32.90 almoço'),
   ].join('\n');
 }
 
@@ -150,15 +185,18 @@ function typedTransactionPromptText(type: TransactionType) {
       : '1200 freela trabalho';
 
   return [
-    `Envie os dados da ${typeLabel}.`,
+    `${type === 'expense' ? '🔴' : '🟢'} <b>Lançar ${typeLabel}</b>`,
     '',
-    `Exemplo: ${example}`,
+    'Agora envie valor, descrição e categoria se souber.',
+    'Eu já vou registrar com o tipo escolhido.',
+    '',
+    `Exemplo: ${codeExample(example)}`,
   ].join('\n');
 }
 
 function getUserErrorMessage(error: unknown) {
   if (error instanceof ApiConnectionError) {
-    return 'A API local nao respondeu agora. Confira se ela esta rodando em API_BASE_URL.';
+    return 'A API local não respondeu agora. Confira se ela está rodando em API_BASE_URL.';
   }
 
   if (error instanceof ApiResponseError) {
@@ -167,7 +205,7 @@ function getUserErrorMessage(error: unknown) {
 
   if (error instanceof ApiError) {
     if (error.status === 401) {
-      return 'Nao consegui autenticar na API. Confira BOT_USER_EMAIL e BOT_USER_PASSWORD.';
+      return 'Não consegui autenticar na API. Confira BOT_USER_EMAIL e BOT_USER_PASSWORD.';
     }
 
     if (error.status === 400) {
@@ -185,7 +223,17 @@ function getUserErrorMessage(error: unknown) {
     return error.message;
   }
 
-  return 'Nao consegui concluir essa acao.';
+  return 'Não consegui concluir essa ação.';
+}
+
+function formatErrorMessage(error: unknown) {
+  return [
+    '⚠️ <b>Não consegui concluir</b>',
+    '',
+    escapeHtml(getUserErrorMessage(error)),
+    '',
+    'Use /help para ver exemplos ou tente novamente pelo menu.',
+  ].join('\n');
 }
 
 function trackMessage(chatId: number | undefined, messageId: number | undefined) {
@@ -211,7 +259,7 @@ async function trackedReply(
   text: string,
   extra?: Parameters<Context['reply']>[1],
 ) {
-  const message = await ctx.reply(text, extra);
+  const message = await ctx.reply(text, withReplyHtml(extra));
   trackMessage(message.chat.id, message.message_id);
   return message;
 }
@@ -262,8 +310,13 @@ async function resetTrackedChatsAtMidnight() {
     try {
       const message = await bot.telegram.sendMessage(
         chatId,
-        'Novo dia iniciado. Limpei a sessao do bot e reabri o menu.',
-        mainMenuKeyboard(),
+        [
+          '🌙 <b>Novo dia iniciado</b>',
+          '',
+          'Limpei a sessão do bot e reabri o menu.',
+          'O histórico financeiro continua disponível no app.',
+        ].join('\n'),
+        withReplyHtml(mainMenuKeyboard()),
       );
       trackMessage(message.chat.id, message.message_id);
     } catch (error) {
@@ -357,21 +410,29 @@ function formatTransactionConfirmation(
   transaction: Transaction,
   categoryName: string | undefined,
 ) {
-  const typeLabel = transaction.type === 'expense' ? 'Gasto' : 'Receita';
+  const isExpense = transaction.type === 'expense';
+  const typeLabel = isExpense ? 'Gasto' : 'Entrada';
+  const icon = isExpense ? '🔴' : '🟢';
 
   return [
-    'Transacao lancada.',
-    `Tipo: ${typeLabel}`,
-    `Valor: ${formatMoney(transaction.amount)}`,
-    `Descricao: ${transaction.description}`,
-    `Categoria: ${categoryName ?? 'sem categoria'}`,
-    `Data: ${formatDateTime(transaction.occurredAt)}`,
+    `✅ <b>${typeLabel} lançado</b>`,
+    '',
+    `${icon} <b>Tipo:</b> ${typeLabel}`,
+    `💵 <b>Valor:</b> ${formatMoney(transaction.amount)}`,
+    `📝 <b>Descrição:</b> ${escapeHtml(transaction.description)}`,
+    `🏷️ <b>Categoria:</b> ${escapeHtml(categoryName ?? 'sem categoria')}`,
+    `📅 <b>Data:</b> ${formatDateTime(transaction.occurredAt)}`,
   ].join('\n');
 }
 
 function formatCategoryList(categories: Category[]) {
   if (categories.length === 0) {
-    return 'Nenhuma categoria cadastrada.';
+    return [
+      '🏷️ <b>Categorias</b>',
+      '',
+      'Nenhuma categoria cadastrada ainda.',
+      'Cadastre pelo app para acelerar os lançamentos pelo bot.',
+    ].join('\n');
   }
 
   const expense = categories.filter((category) => category.type === 'expense');
@@ -379,11 +440,11 @@ function formatCategoryList(categories: Category[]) {
   const both = categories.filter((category) => category.type === 'both');
 
   return [
-    'Categorias cadastradas:',
+    '🏷️ <b>Categorias cadastradas</b>',
     '',
-    `Gastos: ${formatCategoryNames(expense)}`,
-    `Receitas: ${formatCategoryNames(income)}`,
-    `Ambas: ${formatCategoryNames(both)}`,
+    `🔴 <b>Gastos:</b> ${formatCategoryNames(expense)}`,
+    `🟢 <b>Entradas:</b> ${formatCategoryNames(income)}`,
+    `⚪ <b>Ambas:</b> ${formatCategoryNames(both)}`,
   ].join('\n');
 }
 
@@ -394,17 +455,17 @@ function formatCategoryNames(categories: Category[]) {
 
   return [...categories]
     .sort((a, b) => a.name.localeCompare(b.name, 'pt-BR'))
-    .map((category) => category.name)
+    .map((category) => escapeHtml(category.name))
     .join(', ');
 }
 
 function typeKeyboard(pendingId: string) {
   return Markup.inlineKeyboard([
     [
-      Markup.button.callback('Gasto', `tx:type:${pendingId}:expense`),
-      Markup.button.callback('Receita', `tx:type:${pendingId}:income`),
+      Markup.button.callback('🔴 Gasto', `tx:type:${pendingId}:expense`),
+      Markup.button.callback('🟢 Entrada', `tx:type:${pendingId}:income`),
     ],
-    [Markup.button.callback('Cancelar', `tx:cancel:${pendingId}`)],
+    [Markup.button.callback('↩️ Cancelar', `tx:cancel:${pendingId}`)],
   ]);
 }
 
@@ -422,18 +483,23 @@ function categoryKeyboard(pending: PendingTransaction) {
   );
   const rows = chunk(buttons, 2);
 
-  rows.push([Markup.button.callback('Sem categoria', `tx:nocat:${pending.id}`)]);
-  rows.push([Markup.button.callback('Cancelar', `tx:cancel:${pending.id}`)]);
+  rows.push([Markup.button.callback('⚪ Sem categoria', `tx:nocat:${pending.id}`)]);
+  rows.push([Markup.button.callback('↩️ Cancelar', `tx:cancel:${pending.id}`)]);
 
   return Markup.inlineKeyboard(rows);
 }
 
 function categoryPrompt(pending: PendingTransaction) {
-  const typeLabel = pending.type === 'expense' ? 'gasto' : 'receita';
+  const typeLabel = pending.type === 'expense' ? 'gasto' : 'entrada';
+  const icon = pending.type === 'expense' ? '🔴' : '🟢';
 
   return [
-    `Categoria para este ${typeLabel}:`,
-    `${formatMoney(pending.amount)} - ${pending.description}`,
+    `🏷️ <b>Escolha a categoria</b>`,
+    '',
+    `${icon} ${escapeHtml(typeLabel)} • ${formatMoney(pending.amount)}`,
+    `📝 ${escapeHtml(pending.description)}`,
+    '',
+    'Toque em uma categoria ou siga sem categoria.',
   ].join('\n');
 }
 
@@ -490,9 +556,16 @@ async function replyWithCategorySelection(
 }
 
 async function editToExpiredMessage(ctx: EditableContext) {
-  await ctx.editMessageText('Esta operacao expirou. Envie a transacao novamente.')
+  const message = [
+    '⏳ <b>Operação expirada</b>',
+    '',
+    'Essa etapa ficou aberta por muito tempo.',
+    'Envie a transação novamente ou use o menu abaixo.',
+  ].join('\n');
+
+  await ctx.editMessageText(message, withEditHtml())
     .catch(() =>
-      trackedReply(ctx, 'Esta operacao expirou. Envie a transacao novamente.'),
+      trackedReply(ctx, message, mainMenuKeyboard()),
     );
 }
 
@@ -501,7 +574,15 @@ async function sendHelp(ctx: ReplyableContext) {
 }
 
 async function sendMainMenu(ctx: ReplyableContext) {
-  await trackedReply(ctx, 'Menu principal:', mainMenuKeyboard());
+  await trackedReply(
+    ctx,
+    [
+      '🏠 <b>Menu principal</b>',
+      '',
+      'Escolha uma ação para continuar.',
+    ].join('\n'),
+    mainMenuKeyboard(),
+  );
 }
 
 async function sendTransactionPrompt(ctx: ReplyableContext) {
@@ -522,7 +603,7 @@ async function sendCategories(ctx: ReplyableContext) {
     logError('categories_list_failed', error);
     await trackedReply(
       ctx,
-      `${getUserErrorMessage(error)}\n\nUse /help para ver exemplos.`,
+      formatErrorMessage(error),
       mainMenuKeyboard(),
     );
   }
@@ -537,8 +618,16 @@ async function cancelPendingOperation(ctx: ReplyableContext) {
   await trackedReply(
     ctx,
     hadPending
-      ? 'Operacao cancelada.'
-      : 'Nao ha operacao em andamento para cancelar.',
+      ? [
+          '↩️ <b>Operação cancelada</b>',
+          '',
+          'Pode iniciar um novo lançamento pelo menu.',
+        ].join('\n')
+      : [
+          'ℹ️ <b>Nada para cancelar</b>',
+          '',
+          'Não há operação em andamento agora.',
+        ].join('\n'),
     mainMenuKeyboard(),
   );
 }
@@ -558,11 +647,12 @@ async function sendMonthlySummary(ctx: ReplyableContext) {
     await trackedReply(
       ctx,
       [
-        `Resumo ${String(summary.month).padStart(2, '0')}/${summary.year}`,
-        `Receitas: ${formatMoney(summary.fixedIncomeTotal + summary.transactionIncomeTotal)}`,
-        `Despesas: ${formatMoney(summary.fixedExpenseTotal + summary.transactionExpenseTotal)}`,
-        `Saldo disponivel: ${formatMoney(summary.availableBalance)}`,
-        `Orcamento diario sugerido: ${formatMoney(summary.suggestedDailyBudget)}`,
+        `📊 <b>Resumo ${String(summary.month).padStart(2, '0')}/${summary.year}</b>`,
+        '',
+        `🟢 <b>Entradas:</b> ${formatMoney(summary.fixedIncomeTotal + summary.transactionIncomeTotal)}`,
+        `🔴 <b>Gastos:</b> ${formatMoney(summary.fixedExpenseTotal + summary.transactionExpenseTotal)}`,
+        `💰 <b>Saldo disponível:</b> ${formatMoney(summary.availableBalance)}`,
+        `📅 <b>Orçamento diário:</b> ${formatMoney(summary.suggestedDailyBudget)}`,
       ].join('\n'),
       mainMenuKeyboard(),
     );
@@ -570,7 +660,7 @@ async function sendMonthlySummary(ctx: ReplyableContext) {
     logError('monthly_summary_failed', error);
     await trackedReply(
       ctx,
-      `${getUserErrorMessage(error)}\n\nUse /help para ver exemplos.`,
+      formatErrorMessage(error),
       mainMenuKeyboard(),
     );
   }
@@ -610,7 +700,14 @@ bot.use(async (ctx, next) => {
 
   if (ctx.from) {
     logWarn('unauthorized_access_blocked', { hasUser: true });
-    await ctx.reply('Acesso negado.');
+    await ctx.reply(
+      [
+        '🔒 <b>Acesso negado</b>',
+        '',
+        'Este bot é privado e está vinculado a um usuário autorizado.',
+      ].join('\n'),
+      withReplyHtml(),
+    );
   }
 });
 
@@ -648,12 +745,15 @@ bot.action(/^tx:type:([a-z0-9]+):(income|expense)$/, async (ctx) => {
   if (getCategoriesForType(pending.categories, pending.type).length === 0) {
     const confirmation = await createTransactionFromPending(pending, undefined);
     pendingTransactions.delete(ctx.from.id);
-    await ctx.editMessageText(confirmation);
+    await ctx.editMessageText(confirmation, withEditHtml());
     await sendMainMenu(ctx);
     return;
   }
 
-  await ctx.editMessageText(categoryPrompt(pending), categoryKeyboard(pending));
+  await ctx.editMessageText(
+    categoryPrompt(pending),
+    withEditHtml(categoryKeyboard(pending)),
+  );
 });
 
 bot.action(/^tx:cat:([a-z0-9]+):(.+)$/, async (ctx) => {
@@ -673,7 +773,11 @@ bot.action(/^tx:cat:([a-z0-9]+):(.+)$/, async (ctx) => {
     logWarn('category_callback_not_found');
     await trackedReply(
       ctx,
-      'Categoria nao encontrada. Use /categorias para atualizar a lista.',
+      [
+        '🏷️ <b>Categoria não encontrada</b>',
+        '',
+        'A lista pode ter mudado. Use /categorias para atualizar e tente novamente.',
+      ].join('\n'),
       mainMenuKeyboard(),
     );
     return;
@@ -681,7 +785,7 @@ bot.action(/^tx:cat:([a-z0-9]+):(.+)$/, async (ctx) => {
 
   const confirmation = await createTransactionFromPending(pending, category);
   pendingTransactions.delete(ctx.from.id);
-  await ctx.editMessageText(confirmation);
+  await ctx.editMessageText(confirmation, withEditHtml());
   await sendMainMenu(ctx);
 });
 
@@ -698,12 +802,12 @@ bot.action(/^tx:nocat:([a-z0-9]+)$/, async (ctx) => {
 
   const confirmation = await createTransactionFromPending(pending, undefined);
   pendingTransactions.delete(ctx.from.id);
-  await ctx.editMessageText(confirmation);
+  await ctx.editMessageText(confirmation, withEditHtml());
   await sendMainMenu(ctx);
 });
 
 bot.action(/^tx:cancel:([a-z0-9]+)$/, async (ctx) => {
-  await ctx.answerCbQuery('Operacao cancelada.');
+  await ctx.answerCbQuery('Operação cancelada.');
 
   const [, pendingId] = ctx.match;
   const pending = getPendingTransaction(ctx.from.id, pendingId);
@@ -713,7 +817,14 @@ bot.action(/^tx:cancel:([a-z0-9]+)$/, async (ctx) => {
   }
 
   logInfo('pending_operation_cancelled', { hadPending: Boolean(pending) });
-  await ctx.editMessageText('Operacao cancelada.');
+  await ctx.editMessageText(
+    [
+      '↩️ <b>Operação cancelada</b>',
+      '',
+      'Pode iniciar um novo lançamento pelo menu.',
+    ].join('\n'),
+    withEditHtml(),
+  );
   await sendMainMenu(ctx);
 });
 
@@ -786,8 +897,11 @@ bot.on(message('text'), async (ctx) => {
       await trackedReply(
         ctx,
         [
-          'Nao identifiquei se isso e gasto ou receita.',
-          `${formatMoney(pending.amount)} - ${pending.description}`,
+          '🤔 <b>É gasto ou entrada?</b>',
+          '',
+          `${formatMoney(pending.amount)} • ${escapeHtml(pending.description)}`,
+          '',
+          'Toque em uma opção para eu continuar.',
         ].join('\n'),
         typeKeyboard(pending.id),
       );
@@ -800,7 +914,7 @@ bot.on(message('text'), async (ctx) => {
     logError('transaction_message_failed', error);
     await trackedReply(
       ctx,
-      `${getUserErrorMessage(error)}\n\nUse /help para ver exemplos.`,
+      formatErrorMessage(error),
       mainMenuKeyboard(),
     );
   }

@@ -66,6 +66,20 @@ Regras:
 - A lista de categorias fica em cache por um periodo curto para evitar chamar a API em toda mensagem.
 - A confirmacao inclui tipo, valor, descricao, categoria resolvida e data.
 
+## Experiencia de uso
+
+As mensagens do bot usam formatacao HTML do Telegram, com titulo curto, emoji
+contextual e proximo passo explicito. Exemplos de mensagens aparecem como
+codigo para facilitar leitura no celular.
+
+Fluxos guiados devem deixar claro o que o usuario precisa fazer:
+
+- Ao tocar em `🔴 Lançar gasto`, o bot pede apenas valor, descricao e categoria.
+- Ao tocar em `🟢 Lançar entrada`, o bot pede apenas valor, descricao e categoria.
+- Se o usuario enviar uma transacao sem tipo, o bot pergunta se e gasto ou entrada.
+- Se faltar categoria, o bot mostra botoes inline para escolher categoria, seguir sem categoria ou cancelar.
+- Erros mostram uma causa resumida e uma acao sugerida, como tentar pelo menu ou abrir `/help`.
+
 ## Logs e erros
 
 Os logs sao emitidos como JSON em stdout, com evento, nivel e metadados
