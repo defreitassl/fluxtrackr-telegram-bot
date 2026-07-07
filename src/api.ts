@@ -1,0 +1,136 @@
+export type TransactionType = 'income' | 'expense';
+export type CategoryType = 'income' | 'expense' | 'both';
+
+export type Category = {
+  id: string;
+  name: string;
+  type: CategoryType;
+};
+
+export type Transaction = {
+  id: string;
+  type: TransactionType;
+  amount: number | string;
+  description: string;
+  categoryId: string | null;
+  source: 'app' | 'telegram';
+};
+
+export type MonthlySummary = {
+  year: number;
+  month: number;
+  fixedIncomeTotal: number;
+  fixedExpenseTotal: number;
+  transactionIncomeTotal: number;
+  transactionExpenseTotal: number;
+  availableBalance: number;
+  suggestedDailyBudget: number;
+};
+
+type ApiClientConfig = {
+  apiBaseUrl: string;
+  email: string;
+  password: string;
+};
+
+type RequestOptions = {
+  method?: string;
+  token?: string;
+  body?: unknown;
+};
+
+export class ApiClient {
+  private token?: string;
+
+  constructor(private readonly config: ApiClientConfig) {}
+
+  async login() {
+    const data = await this.request<{ accessToken: string }>('/auth/login', {
+      method: 'POST',
+      body: {
+        email: this.config.email,
+        password: this.config.password,
+      },
+    });
+
+    this.token = data.accessToken;
+    return data.accessToken;
+  }
+
+  async getCategories() {
+    return this.authenticatedRequest<Category[]>('/categories');
+  }
+
+  async createTransaction(input: {
+    type: TransactionType;
+    amount: number;
+    description: string;
+    categoryId?: string;
+  }) {
+    return this.authenticatedRequest<Transaction>('/transactions', {
+      method: 'POST',
+      body: {
+        ...input,
+        source: 'telegram',
+      },
+    });
+  }
+
+  async getMonthlySummary(year: number, month: number) {
+    return this.authenticatedRequest<MonthlySummary>(
+      `/monthly-summary?year=${year}&month=${month}`,
+    );
+  }
+
+  private async authenticatedRequest<T>(
+    path: string,
+    options: RequestOptions = {},
+  ) {
+    const token = this.token ?? (await this.login());
+
+    try {
+      return await this.request<T>(path, { ...options, token });
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 401) {
+        const freshToken = await this.login();
+        return this.request<T>(path, { ...options, token: freshToken });
+      }
+
+      throw error;
+    }
+  }
+
+  private async request<T>(path: string, options: RequestOptions = {}) {
+    const response = await fetch(`${this.config.apiBaseUrl}${path}`, {
+      method: options.method ?? 'GET',
+      headers: {
+        Accept: 'application/json',
+        'Content-Type': 'application/json',
+        ...(options.token ? { Authorization: `Bearer ${options.token}` } : {}),
+      },
+      body: options.body ? JSON.stringify(options.body) : undefined,
+    });
+    const text = await response.text();
+    const data = text ? JSON.parse(text) : null;
+
+    if (!response.ok) {
+      const message =
+        data?.message ?? `Request failed with status ${response.status}`;
+      throw new ApiError(
+        response.status,
+        Array.isArray(message) ? message.join(', ') : message,
+      );
+    }
+
+    return data as T;
+  }
+}
+
+class ApiError extends Error {
+  constructor(
+    readonly status: number,
+    message: string,
+  ) {
+    super(message);
+  }
+}
