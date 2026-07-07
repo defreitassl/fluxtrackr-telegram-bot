@@ -40,10 +40,12 @@ export function parseTransactionMessage(
     throw new Error('Informe uma descricao para a transacao.');
   }
 
-  const category = findCategory(descriptionParts.at(-1), type, categories);
-  const description = category
-    ? descriptionParts.slice(0, -1).join(' ')
-    : descriptionParts.join(' ');
+  const resolvedCategory = findCategoryInDescription(
+    descriptionParts,
+    type,
+    categories,
+  );
+  const description = resolvedCategory.descriptionParts.join(' ');
 
   if (!description) {
     throw new Error('Informe uma descricao alem da categoria.');
@@ -53,8 +55,8 @@ export function parseTransactionMessage(
     type,
     amount: Math.round(amount * 100) / 100,
     description,
-    categoryId: category?.id,
-    categoryName: category?.name,
+    categoryId: resolvedCategory.category?.id,
+    categoryName: resolvedCategory.category?.name,
   };
 }
 
@@ -87,21 +89,58 @@ export function parseLooseTransactionMessage(
   };
 }
 
-function findCategory(
-  value: string | undefined,
+function findCategoryInDescription(
+  descriptionParts: string[],
   type: TransactionType,
   categories: Category[],
 ) {
-  if (!value) {
-    return undefined;
+  const normalizedParts = descriptionParts.map(normalize);
+  const candidates = categories
+    .filter((category) => category.type === 'both' || category.type === type)
+    .map((category) => ({
+      category,
+      parts: category.name.trim().split(/\s+/).map(normalize),
+    }))
+    .sort((a, b) => b.parts.length - a.parts.length);
+
+  for (const candidate of candidates) {
+    const index = findSequenceIndex(normalizedParts, candidate.parts);
+
+    if (index === -1) {
+      continue;
+    }
+
+    return {
+      category: candidate.category,
+      descriptionParts: [
+        ...descriptionParts.slice(0, index),
+        ...descriptionParts.slice(index + candidate.parts.length),
+      ],
+    };
   }
 
-  const normalizedValue = normalize(value);
+  return {
+    category: undefined,
+    descriptionParts,
+  };
+}
 
-  return categories.find((category) => {
-    const acceptsType = category.type === 'both' || category.type === type;
-    return acceptsType && normalize(category.name) === normalizedValue;
-  });
+function findSequenceIndex(parts: string[], sequence: string[]) {
+  if (sequence.length === 0 || sequence.length > parts.length) {
+    return -1;
+  }
+
+  for (let index = 0; index <= parts.length - sequence.length; index += 1) {
+    const matches = sequence.every(
+      (sequencePart, offset) => parts[index + offset] === sequencePart,
+    );
+
+    if (matches) {
+      return index;
+    }
+  }
+
+  return -1;
 }
 
 function normalize(value: string) {

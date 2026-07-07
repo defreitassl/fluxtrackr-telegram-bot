@@ -124,17 +124,24 @@ export class ApiClient {
   }
 
   private async request<T>(path: string, options: RequestOptions = {}) {
-    const response = await fetch(`${this.config.apiBaseUrl}${path}`, {
-      method: options.method ?? 'GET',
-      headers: {
-        Accept: 'application/json',
-        'Content-Type': 'application/json',
-        ...(options.token ? { Authorization: `Bearer ${options.token}` } : {}),
-      },
-      body: options.body ? JSON.stringify(options.body) : undefined,
-    });
+    let response: Response;
+
+    try {
+      response = await fetch(`${this.config.apiBaseUrl}${path}`, {
+        method: options.method ?? 'GET',
+        headers: {
+          Accept: 'application/json',
+          'Content-Type': 'application/json',
+          ...(options.token ? { Authorization: `Bearer ${options.token}` } : {}),
+        },
+        body: options.body ? JSON.stringify(options.body) : undefined,
+      });
+    } catch {
+      throw new ApiConnectionError('Nao consegui conectar na API.');
+    }
+
     const text = await response.text();
-    const data = text ? JSON.parse(text) : null;
+    const data = parseJsonResponse(text);
 
     if (!response.ok) {
       const message =
@@ -149,11 +156,33 @@ export class ApiClient {
   }
 }
 
-class ApiError extends Error {
+function parseJsonResponse(text: string) {
+  if (!text) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new ApiResponseError('A API retornou uma resposta invalida.');
+  }
+}
+
+export class ApiError extends Error {
+  readonly name = 'ApiError';
+
   constructor(
     readonly status: number,
     message: string,
   ) {
     super(message);
   }
+}
+
+export class ApiConnectionError extends Error {
+  readonly name = 'ApiConnectionError';
+}
+
+export class ApiResponseError extends Error {
+  readonly name = 'ApiResponseError';
 }
