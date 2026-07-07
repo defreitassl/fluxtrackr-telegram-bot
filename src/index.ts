@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import https from 'node:https';
 import { Context, Markup, Telegraf } from 'telegraf';
 import { message } from 'telegraf/filters';
@@ -13,8 +14,10 @@ import {
 import { loadConfig } from './config';
 import { logError, logInfo, logWarn } from './logger';
 import {
+  DEFAULT_TRANSACTION_DESCRIPTION,
   parseLooseTransactionMessage,
   parseTransactionMessage,
+  TransactionParseError,
 } from './parser';
 
 const PENDING_TRANSACTION_TTL_MS = 10 * 60 * 1000;
@@ -58,6 +61,7 @@ type EditableContext = ReplyableContext & Pick<Context, 'editMessageText'>;
 
 type BotContext = Context & {
   from: { id: number };
+  chat: { id: number; type: string };
 };
 
 const config = loadConfig();
@@ -109,6 +113,14 @@ function isAuthorized(userId: number | undefined) {
   return userId === config.telegramUserId;
 }
 
+function isAuthorizedPrivateChat(ctx: Context): ctx is BotContext {
+  return (
+    isAuthorized(ctx.from?.id) &&
+    ctx.chat?.type === 'private' &&
+    ctx.chat.id === config.telegramUserId
+  );
+}
+
 function startsWithKnownTypeCommand(text: string) {
   const [command] = text.trim().split(/\s+/);
   return ['gasto', 'receita'].includes(command?.toLowerCase() ?? '');
@@ -140,7 +152,7 @@ function startText() {
     '',
     'Escolha uma ação no menu ou envie uma transação em texto livre.',
     '',
-    `Exemplo: ${codeExample('gasto 32.90 almoço alimentação')}`,
+    `Exemplo: ${codeExample('32.90')}`,
   ].join('\n');
 }
 
@@ -153,8 +165,9 @@ function helpText() {
     `• ${codeExample('gasto 32.90 almoço alimentação')}`,
     `• ${codeExample('receita 1200 freela trabalho')}`,
     `• ${codeExample('32.90 almoço')}`,
+    `• ${codeExample('32.90')}`,
     '',
-    'Se faltar tipo ou categoria, eu pergunto no próximo passo.',
+    'Se faltar tipo, categoria ou descrição, eu pergunto o necessário.',
     '',
     '<b>Comandos úteis</b>',
     '📊 /resumo - resumo do mês atual',
@@ -174,6 +187,7 @@ function transactionPromptText() {
     codeExample('gasto 32.90 almoço alimentação'),
     codeExample('receita 1200 freela trabalho'),
     codeExample('32.90 almoço'),
+    codeExample('32.90'),
   ].join('\n');
 }
 
@@ -187,7 +201,7 @@ function typedTransactionPromptText(type: TransactionType) {
   return [
     `${type === 'expense' ? '🔴' : '🟢'} <b>Lançar ${typeLabel}</b>`,
     '',
-    'Agora envie valor, descrição e categoria se souber.',
+    'Agora envie o valor. Descrição e categoria são opcionais.',
     'Eu já vou registrar com o tipo escolhido.',
     '',
     `Exemplo: ${codeExample(example)}`,
@@ -196,7 +210,7 @@ function typedTransactionPromptText(type: TransactionType) {
 
 function getUserErrorMessage(error: unknown) {
   if (error instanceof ApiConnectionError) {
-    return 'A API local não respondeu agora. Confira se ela está rodando em API_BASE_URL.';
+    return 'Não consegui falar com a API agora. Confira se ela está rodando e tente novamente.';
   }
 
   if (error instanceof ApiResponseError) {
@@ -205,21 +219,21 @@ function getUserErrorMessage(error: unknown) {
 
   if (error instanceof ApiError) {
     if (error.status === 401) {
-      return 'Não consegui autenticar na API. Confira BOT_USER_EMAIL e BOT_USER_PASSWORD.';
+      return 'Não consegui autenticar na API. Revise a configuração do bot.';
     }
 
     if (error.status === 400) {
-      return `A API recusou os dados: ${error.message}`;
+      return 'A API recusou os dados. Revise valor, descrição e categoria.';
     }
 
     if (error.status >= 500) {
       return 'A API teve um erro interno. Tente novamente em instantes.';
     }
 
-    return error.message;
+    return 'A API recusou a solicitação. Tente novamente em instantes.';
   }
 
-  if (error instanceof Error) {
+  if (error instanceof TransactionParseError) {
     return error.message;
   }
 
@@ -286,13 +300,15 @@ function scheduleDailyChatReset() {
 }
 
 async function resetTrackedChatsAtMidnight() {
-  const chatIds = new Set<number>([
-    ...trackedChatMessages.keys(),
-    config.telegramUserId,
-  ]);
+  const chatIds = new Set<number>(trackedChatMessages.keys());
 
   resetUserState(config.telegramUserId);
   chatSessions.delete(config.telegramUserId);
+
+  if (chatIds.size === 0) {
+    logInfo('daily_chat_reset_completed', { chatCount: 0 });
+    return;
+  }
 
   for (const chatId of chatIds) {
     const messageIds = trackedChatMessages.get(chatId) ?? new Set<number>();
@@ -337,7 +353,7 @@ function createPendingTransaction(
 ) {
   const pending = {
     ...input,
-    id: Math.random().toString(36).slice(2, 8),
+    id: randomBytes(6).toString('hex'),
     createdAt: Date.now(),
   };
 
@@ -368,20 +384,29 @@ function setPendingTypeSelection(userId: number, type: TransactionType) {
   });
 }
 
-function consumePendingTypeSelection(userId: number) {
+function getPendingTypeSelection(userId: number) {
   const pendingType = pendingTypeSelections.get(userId);
 
   if (!pendingType) {
     return undefined;
   }
 
-  pendingTypeSelections.delete(userId);
-
   if (Date.now() - pendingType.createdAt > PENDING_TRANSACTION_TTL_MS) {
+    pendingTypeSelections.delete(userId);
     return undefined;
   }
 
   return pendingType.type;
+}
+
+function consumePendingTypeSelection(userId: number) {
+  const pendingType = getPendingTypeSelection(userId);
+
+  if (pendingType) {
+    pendingTypeSelections.delete(userId);
+  }
+
+  return pendingType;
 }
 
 function getCategoriesForType(categories: Category[], type: TransactionType) {
@@ -419,7 +444,7 @@ function formatTransactionConfirmation(
     '',
     `${icon} <b>Tipo:</b> ${typeLabel}`,
     `💵 <b>Valor:</b> ${formatMoney(transaction.amount)}`,
-    `📝 <b>Descrição:</b> ${escapeHtml(transaction.description)}`,
+    `📝 <b>Descrição:</b> ${escapeHtml(transaction.description || DEFAULT_TRANSACTION_DESCRIPTION)}`,
     `🏷️ <b>Categoria:</b> ${escapeHtml(categoryName ?? 'sem categoria')}`,
     `📅 <b>Data:</b> ${formatDateTime(transaction.occurredAt)}`,
   ].join('\n');
@@ -497,7 +522,7 @@ function categoryPrompt(pending: PendingTransaction) {
     `🏷️ <b>Escolha a categoria</b>`,
     '',
     `${icon} ${escapeHtml(typeLabel)} • ${formatMoney(pending.amount)}`,
-    `📝 ${escapeHtml(pending.description)}`,
+    `📝 ${escapeHtml(pending.description || DEFAULT_TRANSACTION_DESCRIPTION)}`,
     '',
     'Toque em uma categoria ou siga sem categoria.',
   ].join('\n');
@@ -545,14 +570,25 @@ async function replyWithCategorySelection(
     throw new Error('Tipo da transacao ainda nao foi definido.');
   }
 
-  if (getCategoriesForType(pending.categories, pending.type).length === 0) {
-    const confirmation = await createTransactionFromPending(pending, undefined);
-    pendingTransactions.delete(ctx.from.id);
-    await trackedReply(ctx, confirmation, mainMenuKeyboard());
-    return;
-  }
-
   await trackedReply(ctx, categoryPrompt(pending), categoryKeyboard(pending));
+}
+
+async function handleActionError(
+  ctx: EditableContext,
+  event: string,
+  error: unknown,
+) {
+  logError(event, error);
+
+  const message = formatErrorMessage(error);
+
+  try {
+    await ctx.editMessageText(message, withEditHtml());
+    await sendMainMenu(ctx);
+  } catch (replyError) {
+    logError('callback_error_reply_failed', replyError);
+    await trackedReply(ctx, message, mainMenuKeyboard()).catch(() => undefined);
+  }
 }
 
 async function editToExpiredMessage(ctx: EditableContext) {
@@ -692,14 +728,38 @@ async function ensureApiIsReachable() {
 }
 
 bot.use(async (ctx, next) => {
-  if (isAuthorized(ctx.from?.id)) {
+  if (isAuthorizedPrivateChat(ctx)) {
     trackIncomingMessage(ctx);
-    await resetExpiredChatSession(ctx as BotContext);
+    await resetExpiredChatSession(ctx);
     return next();
   }
 
+  if (isAuthorized(ctx.from?.id)) {
+    logWarn('non_private_chat_blocked', {
+      chatType: ctx.chat?.type ?? 'unknown',
+    });
+
+    await ctx.reply(
+      [
+        '🔒 <b>Use o chat privado</b>',
+        '',
+        'Para proteger seus dados financeiros, este bot só responde na conversa privada.',
+      ].join('\n'),
+      withReplyHtml(),
+    ).catch(() => undefined);
+    return;
+  }
+
   if (ctx.from) {
-    logWarn('unauthorized_access_blocked', { hasUser: true });
+    logWarn('unauthorized_access_blocked', {
+      hasUser: true,
+      chatType: ctx.chat?.type ?? 'unknown',
+    });
+
+    if (ctx.chat?.type !== 'private') {
+      return;
+    }
+
     await ctx.reply(
       [
         '🔒 <b>Acesso negado</b>',
@@ -730,114 +790,126 @@ bot.hears(MENU_BUTTONS.cancel, cancelPendingOperation);
 bot.hears(MENU_BUTTONS.help, sendHelp);
 
 bot.action(/^tx:type:([a-z0-9]+):(income|expense)$/, async (ctx) => {
-  await ctx.answerCbQuery();
+  try {
+    await ctx.answerCbQuery();
 
-  const [, pendingId, type] = ctx.match;
-  const pending = getPendingTransaction(ctx.from.id, pendingId);
+    const [, pendingId, type] = ctx.match;
+    const pending = getPendingTransaction(ctx.from.id, pendingId);
 
-  if (!pending) {
-    await editToExpiredMessage(ctx);
+    if (!pending) {
+      await editToExpiredMessage(ctx);
+      return;
+    }
+
+    pending.type = type as TransactionType;
+
+    await ctx.editMessageText(
+      categoryPrompt(pending),
+      withEditHtml(categoryKeyboard(pending)),
+    );
+  } catch (error) {
+    await handleActionError(ctx, 'type_callback_failed', error);
     return;
   }
+});
 
-  pending.type = type as TransactionType;
+bot.action(/^tx:cat:([a-z0-9]+):(.+)$/, async (ctx) => {
+  try {
+    await ctx.answerCbQuery();
 
-  if (getCategoriesForType(pending.categories, pending.type).length === 0) {
+    const [, pendingId, categoryId] = ctx.match;
+    const pending = getPendingTransaction(ctx.from.id, pendingId);
+
+    if (!pending) {
+      await editToExpiredMessage(ctx);
+      return;
+    }
+
+    const category = pending.categories.find((item) => item.id === categoryId);
+
+    if (!category) {
+      logWarn('category_callback_not_found');
+      await trackedReply(
+        ctx,
+        [
+          '🏷️ <b>Categoria não encontrada</b>',
+          '',
+          'A lista pode ter mudado. Use /categorias para atualizar e tente novamente.',
+        ].join('\n'),
+        mainMenuKeyboard(),
+      );
+      return;
+    }
+
+    const confirmation = await createTransactionFromPending(pending, category);
+    pendingTransactions.delete(ctx.from.id);
+    await ctx.editMessageText(confirmation, withEditHtml());
+    await sendMainMenu(ctx);
+  } catch (error) {
+    await handleActionError(ctx, 'category_callback_failed', error);
+    return;
+  }
+});
+
+bot.action(/^tx:nocat:([a-z0-9]+)$/, async (ctx) => {
+  try {
+    await ctx.answerCbQuery();
+
+    const [, pendingId] = ctx.match;
+    const pending = getPendingTransaction(ctx.from.id, pendingId);
+
+    if (!pending) {
+      await editToExpiredMessage(ctx);
+      return;
+    }
+
     const confirmation = await createTransactionFromPending(pending, undefined);
     pendingTransactions.delete(ctx.from.id);
     await ctx.editMessageText(confirmation, withEditHtml());
     await sendMainMenu(ctx);
+  } catch (error) {
+    await handleActionError(ctx, 'no_category_callback_failed', error);
     return;
   }
-
-  await ctx.editMessageText(
-    categoryPrompt(pending),
-    withEditHtml(categoryKeyboard(pending)),
-  );
-});
-
-bot.action(/^tx:cat:([a-z0-9]+):(.+)$/, async (ctx) => {
-  await ctx.answerCbQuery();
-
-  const [, pendingId, categoryId] = ctx.match;
-  const pending = getPendingTransaction(ctx.from.id, pendingId);
-
-  if (!pending) {
-    await editToExpiredMessage(ctx);
-    return;
-  }
-
-  const category = pending.categories.find((item) => item.id === categoryId);
-
-  if (!category) {
-    logWarn('category_callback_not_found');
-    await trackedReply(
-      ctx,
-      [
-        '🏷️ <b>Categoria não encontrada</b>',
-        '',
-        'A lista pode ter mudado. Use /categorias para atualizar e tente novamente.',
-      ].join('\n'),
-      mainMenuKeyboard(),
-    );
-    return;
-  }
-
-  const confirmation = await createTransactionFromPending(pending, category);
-  pendingTransactions.delete(ctx.from.id);
-  await ctx.editMessageText(confirmation, withEditHtml());
-  await sendMainMenu(ctx);
-});
-
-bot.action(/^tx:nocat:([a-z0-9]+)$/, async (ctx) => {
-  await ctx.answerCbQuery();
-
-  const [, pendingId] = ctx.match;
-  const pending = getPendingTransaction(ctx.from.id, pendingId);
-
-  if (!pending) {
-    await editToExpiredMessage(ctx);
-    return;
-  }
-
-  const confirmation = await createTransactionFromPending(pending, undefined);
-  pendingTransactions.delete(ctx.from.id);
-  await ctx.editMessageText(confirmation, withEditHtml());
-  await sendMainMenu(ctx);
 });
 
 bot.action(/^tx:cancel:([a-z0-9]+)$/, async (ctx) => {
-  await ctx.answerCbQuery('Operação cancelada.');
+  try {
+    await ctx.answerCbQuery('Operação cancelada.');
 
-  const [, pendingId] = ctx.match;
-  const pending = getPendingTransaction(ctx.from.id, pendingId);
+    const [, pendingId] = ctx.match;
+    const pending = getPendingTransaction(ctx.from.id, pendingId);
 
-  if (pending) {
-    pendingTransactions.delete(ctx.from.id);
+    if (pending) {
+      pendingTransactions.delete(ctx.from.id);
+    }
+
+    logInfo('pending_operation_cancelled', { hadPending: Boolean(pending) });
+    await ctx.editMessageText(
+      [
+        '↩️ <b>Operação cancelada</b>',
+        '',
+        'Pode iniciar um novo lançamento pelo menu.',
+      ].join('\n'),
+      withEditHtml(),
+    );
+    await sendMainMenu(ctx);
+  } catch (error) {
+    await handleActionError(ctx, 'cancel_callback_failed', error);
+    return;
   }
-
-  logInfo('pending_operation_cancelled', { hadPending: Boolean(pending) });
-  await ctx.editMessageText(
-    [
-      '↩️ <b>Operação cancelada</b>',
-      '',
-      'Pode iniciar um novo lançamento pelo menu.',
-    ].join('\n'),
-    withEditHtml(),
-  );
-  await sendMainMenu(ctx);
 });
 
 bot.on(message('text'), async (ctx) => {
   const userId = ctx.from.id;
-  pendingTransactions.delete(userId);
 
   try {
     const categories = await api.getCategories();
-    const pendingType = consumePendingTypeSelection(userId);
+    const pendingType = getPendingTypeSelection(userId);
 
     if (pendingType) {
       const loose = parseLooseTransactionMessage(ctx.message.text);
+      consumePendingTypeSelection(userId);
       const pending = createPendingTransaction(userId, {
         type: pendingType,
         amount: loose.amount,
@@ -853,6 +925,7 @@ bot.on(message('text'), async (ctx) => {
       const parsed = parseTransactionMessage(ctx.message.text, categories);
 
       if (parsed.categoryId) {
+        pendingTransactions.delete(userId);
         const transaction = await api.createTransaction({
           type: parsed.type,
           amount: parsed.amount,

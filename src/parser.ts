@@ -13,6 +13,12 @@ export type LooseParsedTransaction = {
   description: string;
 };
 
+export class TransactionParseError extends Error {
+  readonly name = 'TransactionParseError';
+}
+
+export const DEFAULT_TRANSACTION_DESCRIPTION = 'Sem descrição';
+
 const TYPE_BY_COMMAND: Record<string, TransactionType> = {
   gasto: 'expense',
   receita: 'income',
@@ -23,22 +29,23 @@ export function parseTransactionMessage(
   categories: Category[],
 ): ParsedTransaction {
   const parts = text.trim().split(/\s+/);
-  const [command, rawAmount, ...descriptionParts] = parts;
+  const [command] = parts;
   const type = command ? TYPE_BY_COMMAND[command.toLowerCase()] : undefined;
 
   if (!type) {
-    throw new Error('Use "gasto" ou "receita" no inicio da mensagem.');
+    throw new TransactionParseError(
+      'Use "gasto" ou "receita" no inicio da mensagem.',
+    );
   }
 
-  const amount = Number(rawAmount?.replace(',', '.'));
+  const amountResult = parseAmountAt(parts, 1);
 
-  if (!Number.isFinite(amount) || amount <= 0) {
-    throw new Error('Informe um valor numerico valido.');
+  if (!amountResult) {
+    throw new TransactionParseError('Informe um valor numerico valido.');
   }
 
-  if (descriptionParts.length === 0) {
-    throw new Error('Informe uma descricao para a transacao.');
-  }
+  const { amount } = amountResult;
+  const descriptionParts = parts.slice(amountResult.endIndex);
 
   const resolvedCategory = findCategoryInDescription(
     descriptionParts,
@@ -47,14 +54,10 @@ export function parseTransactionMessage(
   );
   const description = resolvedCategory.descriptionParts.join(' ');
 
-  if (!description) {
-    throw new Error('Informe uma descricao alem da categoria.');
-  }
-
   return {
     type,
     amount: Math.round(amount * 100) / 100,
-    description,
+    description: description || DEFAULT_TRANSACTION_DESCRIPTION,
     categoryId: resolvedCategory.category?.id,
     categoryName: resolvedCategory.category?.name,
   };
@@ -64,29 +67,91 @@ export function parseLooseTransactionMessage(
   text: string,
 ): LooseParsedTransaction {
   const parts = text.trim().split(/\s+/);
-  const amountIndex = parts.findIndex((part) => {
-    const value = Number(part.replace(',', '.'));
-    return Number.isFinite(value) && value > 0;
-  });
+  const amountResult = findAmount(parts);
 
-  if (amountIndex === -1) {
-    throw new Error('Informe um valor numerico valido.');
+  if (!amountResult) {
+    throw new TransactionParseError('Informe um valor numerico valido.');
   }
 
-  const amount = Number(parts[amountIndex]?.replace(',', '.'));
   const description = parts
-    .filter((_, index) => index !== amountIndex)
+    .filter(
+      (_, index) =>
+        index < amountResult.startIndex || index >= amountResult.endIndex,
+    )
     .join(' ')
     .trim();
 
-  if (!description) {
-    throw new Error('Informe uma descricao para a transacao.');
+  return {
+    amount: Math.round(amountResult.amount * 100) / 100,
+    description: description || DEFAULT_TRANSACTION_DESCRIPTION,
+  };
+}
+
+function findAmount(parts: string[]) {
+  for (let index = 0; index < parts.length; index += 1) {
+    const amount = parseAmountAt(parts, index);
+
+    if (amount) {
+      return amount;
+    }
+  }
+
+  return undefined;
+}
+
+function parseAmountAt(parts: string[], startIndex: number) {
+  const current = parts[startIndex];
+
+  if (!current) {
+    return undefined;
+  }
+
+  const joinedWithNext =
+    /^r\$$/i.test(current) && parts[startIndex + 1]
+      ? `${current} ${parts[startIndex + 1]}`
+      : current;
+  const amount = parseMoney(joinedWithNext);
+
+  if (!amount) {
+    return undefined;
   }
 
   return {
-    amount: Math.round(amount * 100) / 100,
-    description,
+    amount,
+    startIndex,
+    endIndex: joinedWithNext === current ? startIndex + 1 : startIndex + 2,
   };
+}
+
+function parseMoney(rawValue: string) {
+  const value = rawValue
+    .trim()
+    .replace(/^r\$\s*/i, '')
+    .replace(/\s+/g, '');
+
+  if (!/^\d[\d.,]*$/.test(value)) {
+    return undefined;
+  }
+
+  const normalized = value.includes(',')
+    ? value.replaceAll('.', '').replace(',', '.')
+    : normalizeDotOnlyMoney(value);
+
+  if (!/^\d+(\.\d{1,2})?$/.test(normalized)) {
+    return undefined;
+  }
+
+  const amount = Number(normalized);
+
+  return Number.isFinite(amount) && amount > 0 ? amount : undefined;
+}
+
+function normalizeDotOnlyMoney(value: string) {
+  if (/^\d{1,3}(\.\d{3})+$/.test(value)) {
+    return value.replaceAll('.', '');
+  }
+
+  return value;
 }
 
 function findCategoryInDescription(

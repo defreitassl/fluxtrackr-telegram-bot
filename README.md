@@ -20,6 +20,10 @@ BOT_USER_PASSWORD=123456
 
 Nao commite `.env`.
 
+`BOT_USER_EMAIL` e `BOT_USER_PASSWORD` sao obrigatorios. `API_BASE_URL` pode
+usar HTTP apenas em `localhost`/`127.0.0.1`; fora do desenvolvimento local, use
+HTTPS.
+
 ## Comandos
 
 - `/start` - mensagem curta de boas-vindas.
@@ -48,23 +52,27 @@ Formatos aceitos:
 
 ```txt
 gasto 32.90 almoço alimentação
+gasto R$ 32,90 almoço alimentação
 receita 1200 freela trabalho
 32.90 almoço
+32.90
 ```
 
 Regras:
 
 - `gasto` vira `expense`.
 - `receita` vira `income`.
-- A segunda palavra e o valor.
-- O restante vira descricao.
+- O valor aceita formatos como `32.90`, `32,90`, `R$ 32,90` e `1.234,56`.
+- O restante vira descricao, mas a descricao e opcional.
 - Se a ultima palavra bater com uma categoria existente, essa categoria e usada.
 - O bot tambem tenta encontrar o nome exato da categoria em qualquer ponto da descricao.
 - Se nao houver categoria correspondente, o bot mostra botoes inline para escolher uma categoria ou seguir sem categoria.
 - Se a mensagem tiver valor e descricao, mas nao tiver tipo, o bot mostra botoes inline para escolher entre gasto e receita.
+- Se a mensagem tiver apenas valor, o bot pergunta primeiro se e gasto ou entrada e depois pergunta a categoria.
 - Todas as transacoes criadas pelo bot usam `source: "telegram"`.
 - A lista de categorias fica em cache por um periodo curto para evitar chamar a API em toda mensagem.
 - A confirmacao inclui tipo, valor, descricao, categoria resolvida e data.
+- O bot responde apenas na conversa privada do `TELEGRAM_USER_ID` configurado.
 
 ## Experiencia de uso
 
@@ -76,7 +84,8 @@ Fluxos guiados devem deixar claro o que o usuario precisa fazer:
 
 - Ao tocar em `🔴 Lançar gasto`, o bot pede apenas valor, descricao e categoria.
 - Ao tocar em `🟢 Lançar entrada`, o bot pede apenas valor, descricao e categoria.
-- Se o usuario enviar uma transacao sem tipo, o bot pergunta se e gasto ou entrada.
+- Descricao e opcional; quando nao vier, o bot registra `Sem descrição`.
+- Se o usuario enviar uma transacao sem tipo, mesmo que seja apenas o valor, o bot pergunta se e gasto ou entrada.
 - Se faltar categoria, o bot mostra botoes inline para escolher categoria, seguir sem categoria ou cancelar.
 - Erros mostram uma causa resumida e uma acao sugerida, como tentar pelo menu ou abrir `/help`.
 
@@ -95,9 +104,10 @@ O bot mantem apenas estado temporario em memoria para operacoes guiadas. Todos
 os dias a 00h, no horario local do processo, ele tenta apagar as mensagens
 rastreadas do dia, limpa operacoes pendentes e envia um menu novo.
 
-Esse reset depende do bot estar rodando no momento da virada do dia. O Telegram
-tambem limita exclusao de mensagens antigas, entao mensagens que o bot nao
-conhece ou nao pode mais excluir podem permanecer no historico.
+Esse reset depende do bot estar rodando no momento da virada do dia e so envia
+um novo menu quando havia mensagens rastreadas no dia. O Telegram tambem limita
+exclusao de mensagens antigas, entao mensagens que o bot nao conhece ou nao
+pode mais excluir podem permanecer no historico.
 
 ## Rodar
 
@@ -111,4 +121,10 @@ Validar tipos:
 
 ```bash
 npm run typecheck
+```
+
+Rodar testes focados:
+
+```bash
+npm test
 ```

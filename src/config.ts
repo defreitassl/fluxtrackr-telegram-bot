@@ -33,12 +33,38 @@ function requiredNumberEnv(name: string) {
   return value;
 }
 
+export function normalizeApiBaseUrl(value: string) {
+  let url: URL;
+
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error('API_BASE_URL must be a valid URL');
+  }
+
+  if (!['http:', 'https:'].includes(url.protocol)) {
+    throw new Error('API_BASE_URL must use http or https');
+  }
+
+  const isLocalHttp =
+    url.protocol === 'http:' &&
+    ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname);
+
+  if (url.protocol === 'http:' && !isLocalHttp) {
+    throw new Error('API_BASE_URL must use https outside local development');
+  }
+
+  return url.toString().replace(/\/$/, '');
+}
+
 export function loadConfig(): BotConfig {
   return {
     telegramBotToken: requiredEnv('TELEGRAM_BOT_TOKEN'),
     telegramUserId: requiredNumberEnv('TELEGRAM_USER_ID'),
-    apiBaseUrl: process.env.API_BASE_URL ?? 'http://localhost:3001',
-    botUserEmail: process.env.BOT_USER_EMAIL ?? 'dev@fluxtrackr.local',
-    botUserPassword: process.env.BOT_USER_PASSWORD ?? '123456',
+    apiBaseUrl: normalizeApiBaseUrl(
+      process.env.API_BASE_URL ?? 'http://localhost:3001',
+    ),
+    botUserEmail: requiredEnv('BOT_USER_EMAIL'),
+    botUserPassword: requiredEnv('BOT_USER_PASSWORD'),
   };
 }

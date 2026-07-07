@@ -35,6 +35,7 @@ type ApiClientConfig = {
 };
 
 const CATEGORIES_CACHE_TTL_MS = 60_000;
+const REQUEST_TIMEOUT_MS = 8_000;
 
 type RequestOptions = {
   method?: string;
@@ -125,6 +126,8 @@ export class ApiClient {
 
   private async request<T>(path: string, options: RequestOptions = {}) {
     let response: Response;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
 
     try {
       response = await fetch(`${this.config.apiBaseUrl}${path}`, {
@@ -135,20 +138,21 @@ export class ApiClient {
           ...(options.token ? { Authorization: `Bearer ${options.token}` } : {}),
         },
         body: options.body ? JSON.stringify(options.body) : undefined,
+        signal: controller.signal,
       });
     } catch {
       throw new ApiConnectionError('Nao consegui conectar na API.');
+    } finally {
+      clearTimeout(timeout);
     }
 
     const text = await response.text();
     const data = parseJsonResponse(text);
 
     if (!response.ok) {
-      const message =
-        data?.message ?? `Request failed with status ${response.status}`;
       throw new ApiError(
         response.status,
-        Array.isArray(message) ? message.join(', ') : message,
+        `API request failed with status ${response.status}`,
       );
     }
 
