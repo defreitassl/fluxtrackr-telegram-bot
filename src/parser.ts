@@ -8,6 +8,11 @@ export type ParsedTransaction = {
   categoryName?: string;
 };
 
+export type LooseParsedTransaction = {
+  amount: number;
+  description: string;
+};
+
 const TYPE_BY_COMMAND: Record<string, TransactionType> = {
   gasto: 'expense',
   receita: 'income',
@@ -50,6 +55,35 @@ export function parseTransactionMessage(
     description,
     categoryId: category?.id,
     categoryName: category?.name,
+  };
+}
+
+export function parseLooseTransactionMessage(
+  text: string,
+): LooseParsedTransaction {
+  const parts = text.trim().split(/\s+/);
+  const amountIndex = parts.findIndex((part) => {
+    const value = Number(part.replace(',', '.'));
+    return Number.isFinite(value) && value > 0;
+  });
+
+  if (amountIndex === -1) {
+    throw new Error('Informe um valor numerico valido.');
+  }
+
+  const amount = Number(parts[amountIndex]?.replace(',', '.'));
+  const description = parts
+    .filter((_, index) => index !== amountIndex)
+    .join(' ')
+    .trim();
+
+  if (!description) {
+    throw new Error('Informe uma descricao para a transacao.');
+  }
+
+  return {
+    amount: Math.round(amount * 100) / 100,
+    description,
   };
 }
 

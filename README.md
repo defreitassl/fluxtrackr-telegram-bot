@@ -25,6 +25,8 @@ Nao commite `.env`.
 - `/start` - mensagem curta de boas-vindas.
 - `/help` - exemplos de mensagens.
 - `/resumo` - resumo do mes atual via `GET /monthly-summary`.
+- `/categorias` - lista as categorias cadastradas na API.
+- `/cancelar` - cancela uma operacao guiada pendente.
 
 ## Cadastro de transacoes
 
@@ -33,6 +35,7 @@ Formatos aceitos:
 ```txt
 gasto 32.90 almoço alimentação
 receita 1200 freela trabalho
+32.90 almoço
 ```
 
 Regras:
@@ -42,8 +45,11 @@ Regras:
 - A segunda palavra e o valor.
 - O restante vira descricao.
 - Se a ultima palavra bater com uma categoria existente, essa categoria e usada.
-- Se nao houver categoria correspondente, a transacao e salva sem categoria.
+- Se nao houver categoria correspondente, o bot mostra botoes inline para escolher uma categoria ou seguir sem categoria.
+- Se a mensagem tiver valor e descricao, mas nao tiver tipo, o bot mostra botoes inline para escolher entre gasto e receita.
 - Todas as transacoes criadas pelo bot usam `source: "telegram"`.
+- A lista de categorias fica em cache por um periodo curto para evitar chamar a API em toda mensagem.
+- A confirmacao inclui tipo, valor, descricao, categoria resolvida e data.
 
 ## Rodar
 

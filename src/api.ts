@@ -13,6 +13,7 @@ export type Transaction = {
   amount: number | string;
   description: string;
   categoryId: string | null;
+  occurredAt?: string;
   source: 'app' | 'telegram';
 };
 
@@ -33,6 +34,8 @@ type ApiClientConfig = {
   password: string;
 };
 
+const CATEGORIES_CACHE_TTL_MS = 60_000;
+
 type RequestOptions = {
   method?: string;
   token?: string;
@@ -41,6 +44,10 @@ type RequestOptions = {
 
 export class ApiClient {
   private token?: string;
+  private categoriesCache?: {
+    data: Category[];
+    expiresAt: number;
+  };
 
   constructor(private readonly config: ApiClientConfig) {}
 
@@ -57,8 +64,24 @@ export class ApiClient {
     return data.accessToken;
   }
 
-  async getCategories() {
-    return this.authenticatedRequest<Category[]>('/categories');
+  async getCategories(options: { forceRefresh?: boolean } = {}) {
+    const now = Date.now();
+
+    if (
+      !options.forceRefresh &&
+      this.categoriesCache &&
+      this.categoriesCache.expiresAt > now
+    ) {
+      return this.categoriesCache.data;
+    }
+
+    const data = await this.authenticatedRequest<Category[]>('/categories');
+    this.categoriesCache = {
+      data,
+      expiresAt: now + CATEGORIES_CACHE_TTL_MS,
+    };
+
+    return data;
   }
 
   async createTransaction(input: {
