@@ -5,7 +5,7 @@ import {
   parseLooseTransactionMessage,
   parseTransactionMessage,
   TransactionParseError,
-} from '../src/parser';
+} from '../src/parser.js';
 
 const categories = [
   { id: 'food', name: 'alimentação', type: 'expense' as const },

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { normalizeApiBaseUrl } from '../src/config';
+import { normalizeApiBaseUrl } from '../src/config.js';
 
 describe('normalizeApiBaseUrl', () => {
   it('allows local HTTP development URLs', () => {

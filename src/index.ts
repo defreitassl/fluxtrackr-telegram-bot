@@ -10,15 +10,15 @@ import {
   Category,
   Transaction,
   TransactionType,
-} from './api';
-import { loadConfig } from './config';
-import { logError, logInfo, logWarn } from './logger';
+} from './api.js';
+import { loadConfig } from './config.js';
+import { logError, logInfo, logWarn } from './logger.js';
 import {
   DEFAULT_TRANSACTION_DESCRIPTION,
   parseLooseTransactionMessage,
   parseTransactionMessage,
   TransactionParseError,
-} from './parser';
+} from './parser.js';
 
 const PENDING_TRANSACTION_TTL_MS = 10 * 60 * 1000;
 const MENU_BUTTONS = {

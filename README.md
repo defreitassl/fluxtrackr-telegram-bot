@@ -24,6 +24,10 @@ Nao commite `.env`.
 usar HTTP apenas em `localhost`/`127.0.0.1`; fora do desenvolvimento local, use
 HTTPS.
 
+Em producao, o bot usa o artefato compilado por `npm run build` e inicia com
+`npm run start`. Mantenha apenas uma replica: o bot usa long polling do
+Telegram, e duas instancias disputariam as mesmas atualizacoes.
+
 ## Comandos
 
 - `/start` - mensagem curta de boas-vindas.
@@ -128,3 +132,11 @@ Rodar testes focados:
 ```bash
 npm test
 ```
+
+## Railway
+
+O [`railway.json`](./railway.json) configura o build e reinicio em falha. O
+servico do bot nao precisa de dominio publico. Configure `API_BASE_URL` com o
+dominio HTTPS publico da API e, para a limpeza diaria ocorrer no horario do
+Brasil, defina `TZ=America/Sao_Paulo`. O passo a passo completo esta em
+[`../docs/technical/railway-deployment.md`](../docs/technical/railway-deployment.md).

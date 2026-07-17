@@ -1,4 +1,4 @@
-import { Category, TransactionType } from './api';
+import { Category, TransactionType } from './api.js';
 
 export type ParsedTransaction = {
   type: TransactionType;
