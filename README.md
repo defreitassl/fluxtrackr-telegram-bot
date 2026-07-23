@@ -16,6 +16,10 @@ TELEGRAM_USER_ID=
 API_BASE_URL=http://localhost:3001
 BOT_USER_EMAIL=dev@fluxtrackr.local
 BOT_USER_PASSWORD=123456
+PORT=3000
+WEBHOOK_BASE_URL=https://seu-bot.up.railway.app
+TELEGRAM_WEBHOOK_PATH=/telegram/webhook
+TELEGRAM_WEBHOOK_SECRET=
 ```
 
 Nao commite `.env`.
@@ -24,9 +28,17 @@ Nao commite `.env`.
 usar HTTP apenas em `localhost`/`127.0.0.1`; fora do desenvolvimento local, use
 HTTPS.
 
+`WEBHOOK_BASE_URL` deve usar HTTPS e nao pode terminar com `/`.
+`TELEGRAM_WEBHOOK_PATH` deve iniciar com `/` e, no deploy padrao, usa
+`/telegram/webhook`. `TELEGRAM_WEBHOOK_SECRET` e obrigatorio: use um valor longo
+e aleatorio, mantenha-o apenas nas variaveis seguras do Railway e nunca o
+registre em logs. O Railway injeta `PORT` automaticamente; `3000` serve apenas
+como valor local de exemplo.
+
 Em producao, o bot usa o artefato compilado por `npm run build` e inicia com
-`npm run start`. Mantenha apenas uma replica: o bot usa long polling do
-Telegram, e duas instancias disputariam as mesmas atualizacoes.
+`npm run start`. Ele recebe atualizacoes pelo webhook HTTPS nativo do Telegram,
+em vez de long polling. Mantenha apenas uma replica para preservar os estados
+temporarios em memoria do fluxo guiado.
 
 ## Comandos
 
@@ -136,7 +148,29 @@ npm test
 ## Railway
 
 O [`railway.json`](./railway.json) configura o build e reinicio em falha. O
-servico do bot nao precisa de dominio publico. Configure `API_BASE_URL` com o
-dominio HTTPS publico da API e, para a limpeza diaria ocorrer no horario do
-Brasil, defina `TZ=America/Sao_Paulo`. O passo a passo completo esta em
+servico do bot precisa de dominio publico HTTPS para o Telegram entregar as
+atualizacoes. No painel do Railway, abra o servico do bot em **Settings > Public
+Networking > Generate Domain**, copie o dominio HTTPS gerado e configure-o como
+`WEBHOOK_BASE_URL`, sem a barra final. O Railway valida `GET /health` antes de
+concluir o deploy; essa rota responde `200` com `{ "status": "ok" }`.
+
+Configure tambem `API_BASE_URL` com o dominio HTTPS publico da API e
+`TZ=America/Sao_Paulo` para manter a limpeza diaria no horario do Brasil.
+Mantenha Serverless e Cron desativados e uma unica replica do servico.
+
+Depois do deploy, consulte o estado do webhook sem exibir o token em logs:
+
+```bash
+curl -sS "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getWebhookInfo"
+```
+
+A URL retornada deve terminar em `/telegram/webhook`, `last_error_date` deve
+estar ausente e `pending_update_count` deve permanecer proximo de zero. Para
+rollback ao long polling, remova o webhook antes de restaurar a versao anterior:
+
+```bash
+curl -sS -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/deleteWebhook"
+```
+
+O passo a passo completo esta em
 [`../docs/technical/railway-deployment.md`](../docs/technical/railway-deployment.md).
