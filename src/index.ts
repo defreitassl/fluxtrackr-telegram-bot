@@ -11,7 +11,7 @@ import {
   Transaction,
   TransactionType,
 } from './api.js';
-import { loadConfig } from './config.js';
+import { getWebhookUrl, loadConfig } from './config.js';
 import { logError, logInfo, logWarn } from './logger.js';
 import {
   DEFAULT_TRANSACTION_DESCRIPTION,
@@ -19,6 +19,7 @@ import {
   parseTransactionMessage,
   TransactionParseError,
 } from './parser.js';
+import { startWebhookServer, type WebhookServer } from './webhook-server.js';
 
 const PENDING_TRANSACTION_TTL_MS = 10 * 60 * 1000;
 const MENU_BUTTONS = {
@@ -82,6 +83,8 @@ const pendingTransactions = new Map<number, PendingTransaction>();
 const pendingTypeSelections = new Map<number, PendingTypeSelection>();
 const chatSessions = new Map<number, ChatSession>();
 const trackedChatMessages = new Map<number, Set<number>>();
+let dailyChatResetTimer: NodeJS.Timeout | undefined;
+let isDailyChatResetScheduled = false;
 
 function escapeHtml(value: string | number | undefined) {
   return String(value ?? '')
@@ -293,10 +296,31 @@ function getNextMidnightDelay() {
 }
 
 function scheduleDailyChatReset() {
-  setTimeout(async () => {
-    await resetTrackedChatsAtMidnight();
-    scheduleDailyChatReset();
+  isDailyChatResetScheduled = true;
+  scheduleNextDailyChatReset();
+}
+
+function scheduleNextDailyChatReset() {
+  dailyChatResetTimer = setTimeout(async () => {
+    try {
+      await resetTrackedChatsAtMidnight();
+    } catch (error) {
+      logError('daily_chat_reset_failed', error);
+    }
+
+    if (isDailyChatResetScheduled) {
+      scheduleNextDailyChatReset();
+    }
   }, getNextMidnightDelay());
+}
+
+function stopDailyChatReset() {
+  isDailyChatResetScheduled = false;
+
+  if (dailyChatResetTimer) {
+    clearTimeout(dailyChatResetTimer);
+    dailyChatResetTimer = undefined;
+  }
 }
 
 async function resetTrackedChatsAtMidnight() {
@@ -724,6 +748,7 @@ async function ensureApiIsReachable() {
     logInfo('api_login_ok');
   } catch (error) {
     logError('api_login_failed', error);
+    throw error;
   }
 }
 
@@ -997,17 +1022,66 @@ bot.catch((error) => {
   logError('bot_unhandled_error', error);
 });
 
-bot
-  .launch(async () => {
-    await configureBotCommands();
-    await ensureApiIsReachable();
-    scheduleDailyChatReset();
-    logInfo('bot_started');
-  })
-  .catch((error: unknown) => {
-    logError('bot_start_failed', error);
-    process.exitCode = 1;
+async function startBot() {
+  await configureBotCommands();
+  await ensureApiIsReachable();
+
+  const webhookServer = await startWebhookServer(bot, config);
+  logInfo('webhook_server_started', {
+    port: config.port,
+    path: config.webhookPath,
   });
 
-process.once('SIGINT', () => bot.stop('SIGINT'));
-process.once('SIGTERM', () => bot.stop('SIGTERM'));
+  const webhookUrl = getWebhookUrl(config);
+
+  try {
+    await bot.telegram.setWebhook(webhookUrl, {
+      secret_token: config.telegramWebhookSecret,
+      drop_pending_updates: false,
+      allowed_updates: ['message', 'callback_query'],
+    });
+  } catch (error) {
+    await webhookServer.close();
+    throw error;
+  }
+
+  logInfo('telegram_webhook_registered', {
+    path: config.webhookPath,
+  });
+
+  scheduleDailyChatReset();
+  registerGracefulShutdown(webhookServer);
+  logInfo('bot_started', { transport: 'webhook' });
+}
+
+function registerGracefulShutdown(webhookServer: WebhookServer) {
+  let shutdownPromise: Promise<void> | undefined;
+
+  const shutdown = (signal: 'SIGINT' | 'SIGTERM') => {
+    if (shutdownPromise) {
+      return;
+    }
+
+    shutdownPromise = (async () => {
+      logInfo('bot_shutdown_started', { signal, transport: 'webhook' });
+      stopDailyChatReset();
+      await webhookServer.close();
+      logInfo('bot_shutdown_completed', { signal, transport: 'webhook' });
+    })();
+
+    void shutdownPromise
+      .then(() => process.exit(0))
+      .catch((error: unknown) => {
+        logError('bot_shutdown_failed', error, { signal });
+        process.exit(1);
+      });
+  };
+
+  process.once('SIGINT', () => shutdown('SIGINT'));
+  process.once('SIGTERM', () => shutdown('SIGTERM'));
+}
+
+void startBot().catch((error: unknown) => {
+  logError('bot_start_failed', error);
+  process.exitCode = 1;
+});
